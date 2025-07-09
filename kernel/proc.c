@@ -303,6 +303,9 @@ fork(void)
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
+  // 继承trace掩码
+  np->tracemask = p->tracemask;
+
   pid = np->pid;
 
   release(&np->lock);
@@ -425,6 +428,21 @@ wait(uint64 addr)
     // Wait for a child to exit.
     sleep(p, &wait_lock);  //DOC: wait-sleep
   }
+}
+
+// 返回非UNUSED进程数
+int
+count_proc(void)
+{
+  int cnt = 0;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED)
+      cnt++;
+    release(&p->lock);
+  }
+  return cnt;
 }
 
 // Per-CPU process scheduler.
