@@ -77,10 +77,39 @@ sys_sleep(void)
 
 
 #ifdef LAB_PGTBL
+// pgaccess系统调用 - 检测页面访问位
+// 参数: addr(起始虚拟地址), len(页面数量), mask_addr(结果掩码地址)
+// 返回: 成功返回0，失败返回-1
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 addr;
+  int len;
+  uint64 mask_addr;
+
+  // 获取用户传入的参数
+  if (argaddr(0, &addr) < 0 || argint(1, &len) < 0 || argaddr(2, &mask_addr) < 0)
+    return -1;
+
+  // 限制检查的页面数量（防止过度计算）
+  if (len > 64) len = 64;
+
+  struct proc *p = myproc();
+  uint64 mask = 0;
+
+  // 遍历指定范围的页面，检查访问位
+  for (int i = 0; i < len; i++) {
+    pte_t *pte = walk(p->pagetable, addr + i * PGSIZE, 0);
+    if (pte && (*pte & PTE_V) && (*pte & PTE_A)) {
+      mask |= (1L << i);        // 在掩码中设置相应位
+      *pte &= ~PTE_A;          // 清除访问位，为下次检测做准备
+    }
+  }
+
+  // 将结果掩码复制到用户空间
+  if (copyout(p->pagetable, mask_addr, (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+
   return 0;
 }
 #endif

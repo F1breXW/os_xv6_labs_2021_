@@ -1,0 +1,28 @@
+// xv6 页表实验 (pgtbl) 实现总结
+// 
+// 本实验实现了三个主要功能：
+//
+// 1. ugetpid - 优化getpid()系统调用性能
+//    通过USYSCALL共享页面机制，让用户程序能够直接从共享内存读取PID，
+//    避免了系统调用的开销。
+//
+// 2. vmprint - 页表结构可视化
+//    递归遍历和打印页表结构，用于调试和理解页表布局。
+//    为进程1(init)添加了页表打印功能。
+//
+// 3. pgaccess - 页面访问位检测
+//    实现了用于垃圾回收的页面访问检测功能，
+//    通过检查PTE中的访问位来确定页面是否被访问过。
+//
+// 主要修改的文件：
+// - kernel/proc.h: 添加shared_pid_page字段
+// - kernel/proc.c: 实现USYSCALL页面的生命周期管理
+// - kernel/vm.c: 实现vmprint()函数
+// - kernel/exec.c: 为进程1添加页表打印
+// - kernel/sysproc.c: 实现pgaccess系统调用
+// - kernel/riscv.h: 添加PTE_A访问位定义和包含保护
+// - kernel/defs.h: 添加函数声明
+// - user/pgaccess.c: 创建pgaccess测试程序
+// - Makefile: 添加用户程序编译规则
+//
+// 所有功能均通过了自动化测试，得分46/46满分

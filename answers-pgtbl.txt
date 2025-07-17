@@ -1,0 +1,11 @@
+1. Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+
+The getppid() system call (if it existed) could be made faster by storing the parent process ID in the shared page. Similarly, getuid() and getgid() system calls could be sped up by storing user and group IDs. Any system call that returns process-specific read-only information that doesn't change frequently could benefit from this optimization, as it eliminates the need to switch from user mode to kernel mode.
+
+2. Explain the output of vmprint in terms of Fig 3-4 from the text. What does page 0 contain? What is in page 2? When running in user mode, could the process read/write the memory mapped by page 1? What does the third to last page contain?
+
+Looking at the vmprint output:
+- Page 0 contains the user program's code and initial data segments (text, data, bss sections)
+- Page 2 contains additional user program data or heap space
+- Page 1 is not accessible by the process in user mode because it lacks the PTE_U (user accessible) bit
+- The third to last page (509) contains kernel data structures that are accessible to the kernel but not the user process, typically used for kernel-user communication

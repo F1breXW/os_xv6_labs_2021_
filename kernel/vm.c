@@ -432,3 +432,35 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+// 打印页表内容的递归辅助函数
+// pagetable: 要打印的页表
+// level: 当前页表层级（0为顶层）
+void
+vmprint_r(pagetable_t pagetable, int level)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      // 根据层级打印相应数量的".."缩进
+      for(int j = 0; j <= level; j++){
+        printf(" ..");
+      }
+      printf("%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        // 此PTE指向更低层级的页表，递归打印
+        uint64 child = PTE2PA(pte);
+        vmprint_r((pagetable_t)child, level + 1);
+      }
+    }
+  }
+}
+
+// 打印页表结构的主函数
+// 用于调试和可视化页表内容
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_r(pagetable, 0);
+}
