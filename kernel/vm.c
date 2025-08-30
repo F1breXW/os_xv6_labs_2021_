@@ -303,20 +303,31 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    
+    // COW实现：不分配新页面，而是共享父进程的页面
+    // 清除写权限并设置COW标志
+    if(flags & PTE_W) {
+      flags &= ~PTE_W;    // 清除写权限
+      flags |= PTE_COW;   // 设置COW标志
+      
+      // 同时修改父进程的PTE
+      *pte = PA2PTE(pa) | flags;
+    }
+    
+    // 增加页面引用计数
+    krefcnt_inc((void*)pa);
+    
+    // 子进程页表映射到相同的物理页面
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
   }
@@ -347,12 +358,35 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    
+    // 检查地址是否在有效范围内
+    if(va0 >= MAXVA)
+      return -1;
+    
+    // 获取PTE
+    pte = walk(pagetable, va0, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -1;
+    
+    // 检查是否是COW页面
+    if(*pte & PTE_COW) {
+      // 处理COW页面错误
+      if(cowpage_fault(pagetable, va0) < 0)
+        return -1;
+    } else if((*pte & PTE_W) == 0) {
+      // 如果不是COW页面但也不可写，则返回错误
+      return -1;
+    }
+    
+    // 使用walkaddr获取物理地址，这会再次验证页面
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+      
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -431,4 +465,70 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// COW页面错误处理函数
+// 当进程尝试写入COW页面时调用此函数
+int
+cowpage_fault(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+  
+  // 检查虚拟地址是否在有效用户空间范围内
+  if(va >= TRAPFRAME || va >= MAXVA)
+    return -1;
+  
+  // 获取页面对齐的虚拟地址
+  va = PGROUNDDOWN(va);
+  
+  // 获取PTE
+  if((pte = walk(pagetable, va, 0)) == 0)
+    return -1;
+  if((*pte & PTE_V) == 0)
+    return -1;
+  if((*pte & PTE_U) == 0)
+    return -1;  // 不是用户页面
+  
+  // 检查是否是COW页面
+  if((*pte & PTE_COW) == 0) {
+    // 不是COW页面，检查是否应该有写权限但被意外清除
+    if((*pte & PTE_W) == 0) {
+      return -1;  // 不可写且不是COW，这是真正的段错误
+    }
+    return -1;  // 不是COW页面
+  }
+  
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+  
+  // 检查引用计数
+  if(krefcnt_get((void*)pa) == 1) {
+    // 只有一个引用，直接恢复写权限
+    flags &= ~PTE_COW;  // 清除COW标志
+    flags |= PTE_W;     // 恢复写权限
+    *pte = PA2PTE(pa) | flags;
+  } else {
+    // 多个引用，需要复制页面
+    if((mem = kalloc()) == 0)
+      return -1;  // 内存不足
+    
+    // 复制页面内容
+    memmove(mem, (char*)pa, PGSIZE);
+    
+    // 更新PTE指向新页面
+    flags &= ~PTE_COW;  // 清除COW标志
+    flags |= PTE_W;     // 恢复写权限
+    *pte = PA2PTE((uint64)mem) | flags;
+    
+    // 释放原页面的一个引用
+    kfree((void*)pa);
+  }
+  
+  // 刷新TLB以确保更改生效
+  sfence_vma();
+  
+  return 0;
 }

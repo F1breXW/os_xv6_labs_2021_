@@ -1,0 +1,19 @@
+Why are there missing keys with 2 threads, but not with 1 thread?
+
+The problem occurs due to race conditions in the hash table operations. When two threads try to insert keys into the same hash bucket concurrently, they can interfere with each other. Here's a specific sequence that can lead to missing keys:
+
+1. Thread A reads table[i] (let's say it's NULL or some existing entry E1)
+2. Thread B reads table[i] (sees the same value)
+3. Thread A creates a new entry E2 and sets table[i] = E2
+4. Thread B creates a new entry E3 and sets table[i] = E3
+
+Result: Thread A's entry E2 is lost because Thread B overwrote the table[i] pointer.
+
+Another scenario can happen in the insert() function:
+1. Both threads call insert() for the same bucket
+2. Both create new entries with malloc()
+3. Both set e->next = n (same value)
+4. Both try to set *p = e, but only the last one wins
+5. The first thread's entry is lost
+
+The root cause is that the put() and insert() functions are not atomic operations, and multiple threads can modify shared data structures (the hash table) without proper synchronization.

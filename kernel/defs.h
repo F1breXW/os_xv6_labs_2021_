@@ -63,6 +63,8 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+void            krefcnt_inc(void *);  // 增加引用计数
+int             krefcnt_get(void *);  // 获取引用计数
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -170,6 +172,7 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+int             cowpage_fault(pagetable_t, uint64);  // COW页面错误处理
 
 // plic.c
 void            plicinit(void);

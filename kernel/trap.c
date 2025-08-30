@@ -68,9 +68,41 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    uint64 cause = r_scause();
+    
+    // 检查是否是存储页面错误 (Store/AMO page fault)
+    if(cause == 15) {
+      uint64 va = r_stval();  // 获取错误的虚拟地址
+      
+      // 检查地址是否在合理的用户空间范围内
+      // MAXVA是最大用户虚拟地址，TRAPFRAME之上的地址是内核地址
+      if(va < TRAPFRAME && va < MAXVA) {
+        // 尝试处理COW页面错误
+        if(cowpage_fault(p->pagetable, va) == 0) {
+          // COW处理成功，继续执行
+        } else {
+          // COW处理失败，可能不是COW页面或其他错误
+          printf("usertrap(): segmentation fault va=%p pid=%d\n", va, p->pid);
+          printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+          p->killed = 1;
+        }
+      } else {
+        // 地址无效
+        printf("usertrap(): invalid address va=%p pid=%d\n", va, p->pid);
+        printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+        p->killed = 1;
+      }
+    } else if(cause == 13) {
+      // 加载页面错误 (Load page fault)
+      uint64 va = r_stval();
+      printf("usertrap(): load page fault va=%p pid=%d\n", va, p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    } else {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   }
 
   if(p->killed)

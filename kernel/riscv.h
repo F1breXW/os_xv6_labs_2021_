@@ -344,6 +344,9 @@ sfence_vma()
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // 1 -> user can access
 
+// 使用RSW位来标记COW页面 (reserved for software)
+#define PTE_COW (1L << 8)  // COW页面标志
+
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 
