@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -303,22 +305,29 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    
+    // If page is writable, make it copy-on-write
+    if(flags & PTE_W) {
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags;
+    }
+    
+    // Map the same physical page in child
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+    
+    // Increment reference count for shared page
+    kaddref((void*)pa);
   }
   return 0;
 
@@ -347,12 +356,26 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    
+    // First get the walkaddr to see if page exists
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+    
+    // Now check if this is a COW page and handle it
+    if((pte = walk(pagetable, va0, 0)) != 0 && (*pte & PTE_V) && (*pte & PTE_COW)) {
+      if(cowfault(pagetable, va0) < 0)
+        return -1;
+      // Re-get the physical address after COW handling
+      pa0 = walkaddr(pagetable, va0);
+      if(pa0 == 0)
+        return -1;
+    }
+    
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -431,4 +454,53 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// Handle copy-on-write page fault
+int
+cowfault(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+  struct proc *p = myproc();
+
+  // Check if virtual address is within valid range
+  if(va >= MAXVA)
+    return -1;
+  
+  // Check if address is within process memory
+  if(va >= p->sz)
+    return -1;
+
+  // Find the PTE
+  if((pte = walk(pagetable, va, 0)) == 0)
+    return -1;
+  
+  // Check if it's a valid COW page
+  if((*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0 || (*pte & PTE_U) == 0)
+    return -1;
+
+  pa = PTE2PA(*pte);
+  
+  // If only one reference, just make it writable
+  if(kgetref((void*)pa) == 1) {
+    flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+    *pte = PA2PTE(pa) | flags;
+  } else {
+    // Allocate new page and copy
+    if((mem = kalloc()) == 0)
+      return -1;
+    
+    memmove(mem, (char*)pa, PGSIZE);
+    
+    flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+    *pte = PA2PTE((uint64)mem) | flags;
+    
+    // Decrease reference count for old page
+    kfree((void*)pa);
+  }
+  
+  return 0;
 }

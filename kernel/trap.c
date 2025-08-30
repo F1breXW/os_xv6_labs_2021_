@@ -68,9 +68,21 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    // Check for store page fault (COW)
+    if(r_scause() == 15) {
+      uint64 va = r_stval();
+      if(va < MAXVA && va < p->sz && cowfault(p->pagetable, va) == 0) {
+        // COW fault handled successfully
+      } else {
+        // COW fault failed or invalid address, kill process
+        printf("usertrap(): COW fault failed va=%p pid=%d\n", va, p->pid);
+        p->killed = 1;
+      }
+    } else {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   }
 
   if(p->killed)

@@ -23,10 +23,17 @@ struct {
   struct run *freelist;
 } kmem;
 
+// Reference count for each physical page
+struct {
+  struct spinlock lock;
+  int cnt[PHYSTOP/PGSIZE]; // ref count for each physical page
+} ref;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&ref.lock, "ref");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +42,11 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    // Initialize reference count to 0 for free pages during startup
+    ref.cnt[(uint64)p / PGSIZE] = 1;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -50,6 +60,14 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // Decrement reference count
+  acquire(&ref.lock);
+  if(--ref.cnt[(uint64)pa / PGSIZE] > 0) {
+    release(&ref.lock);
+    return; // Still has references, don't free
+  }
+  release(&ref.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -76,7 +94,38 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    // Set initial reference count to 1
+    acquire(&ref.lock);
+    ref.cnt[(uint64)r / PGSIZE] = 1;
+    release(&ref.lock);
+  }
   return (void*)r;
+}
+
+// Increment reference count for physical page
+void
+kaddref(void *pa)
+{
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    return;
+  
+  acquire(&ref.lock);
+  ref.cnt[(uint64)pa / PGSIZE]++;
+  release(&ref.lock);
+}
+
+// Get reference count for physical page
+int
+kgetref(void *pa)
+{
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    return 0;
+  
+  int count;
+  acquire(&ref.lock);
+  count = ref.cnt[(uint64)pa / PGSIZE];
+  release(&ref.lock);
+  return count;
 }
