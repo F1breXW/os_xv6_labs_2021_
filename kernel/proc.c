@@ -3,8 +3,17 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+
+#ifndef MAP_SHARED
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
+#endif
 
 struct cpu cpus[NCPU];
 
@@ -140,6 +149,11 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  // Initialize VMA array
+  for(int i = 0; i < NVMA; i++) {
+    p->vmas[i].used = 0;
+  }
 
   return p;
 }
@@ -301,6 +315,14 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // Copy memory mappings
+  for(i = 0; i < NVMA; i++) {
+    if(p->vmas[i].used) {
+      np->vmas[i] = p->vmas[i];
+      np->vmas[i].file = filedup(p->vmas[i].file);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -353,7 +375,46 @@ exit(int status)
     }
   }
 
+  // Cleanup memory mappings
   begin_op();
+  for(int i = 0; i < NVMA; i++) {
+    if(p->vmas[i].used) {
+      // If it's a MAP_SHARED mapping, write dirty pages back
+      if(p->vmas[i].flags == MAP_SHARED) {
+        uint64 start = PGROUNDDOWN(p->vmas[i].addr);
+        uint64 end = PGROUNDUP(p->vmas[i].addr + p->vmas[i].length);
+        
+        for(uint64 va = start; va < end; va += PGSIZE) {
+          pte_t *pte = walk(p->pagetable, va, 0);
+          if(pte && (*pte & PTE_V)) {
+            uint64 pa = PTE2PA(*pte);
+            uint64 file_offset = p->vmas[i].offset + (va - p->vmas[i].addr);
+            
+            ilock(p->vmas[i].file->ip);
+            writei(p->vmas[i].file->ip, 0, pa, file_offset, PGSIZE);
+            iunlock(p->vmas[i].file->ip);
+          }
+        }
+      }
+      
+      // Unmap pages manually - only unmap actually mapped pages
+      uint64 start = PGROUNDDOWN(p->vmas[i].addr);
+      uint64 end = PGROUNDUP(p->vmas[i].addr + p->vmas[i].length);
+      
+      for(uint64 va = start; va < end; va += PGSIZE) {
+        pte_t *pte = walk(p->pagetable, va, 0);
+        if(pte && (*pte & PTE_V)) {
+          // Page is mapped, unmap it
+          uint64 pa = PTE2PA(*pte);
+          kfree((void*)pa);
+          *pte = 0;
+        }
+      }
+      
+      fileclose(p->vmas[i].file);
+      p->vmas[i].used = 0;
+    }
+  }
   iput(p->cwd);
   end_op();
   p->cwd = 0;

@@ -3,8 +3,33 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+
+#ifndef PROT_READ
+#define PROT_READ       0x1
+#define PROT_W      int r = 0;
+      if(bytes_to_read > 0) {
+        printf("Reading %d bytes from file at offset %d (file size: %d)\n", bytes_to_read, file_offset, file_size);
+        r = readi(v->file->ip, 0, (uint64)mem, file_offset, bytes_to_read);
+        printf("Read %d bytes, first 5 chars: %c%c%c%c%c\n", r, 
+               (mem[0] >= 32 && mem[0] < 127) ? mem[0] : '?',
+               (mem[1] >= 32 && mem[1] < 127) ? mem[1] : '?', 
+               (mem[2] >= 32 && mem[2] < 127) ? mem[2] : '?',
+               (mem[3] >= 32 && mem[3] < 127) ? mem[3] : '?',
+               (mem[4] >= 32 && mem[4] < 127) ? mem[4] : '?');
+        if(r != bytes_to_read) {
+          iunlock(v->file->ip);
+          kfree(mem);
+          return -1;
+        }
+      }
+      iunlock(v->file->ip);
+#endif
 
 struct spinlock tickslock;
 uint ticks;
@@ -68,9 +93,20 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    uint64 va = r_stval();
+    if(r_scause() == 13 || r_scause() == 15) {  // load/store page fault
+      if(handle_pagefault(va) == 0) {
+        // Successfully handled page fault
+      } else {
+        printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+        printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+        p->killed = 1;
+      }
+    } else {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   }
 
   if(p->killed)
@@ -216,5 +252,67 @@ devintr()
   } else {
     return 0;
   }
+}
+
+// Handle page fault for mmap regions
+int
+handle_pagefault(uint64 va)
+{
+  struct proc *p = myproc();
+  
+  // Find the VMA for this virtual address
+  for(int i = 0; i < NVMA; i++) {
+    struct vma *v = &p->vmas[i];
+    if(v->used && va >= v->addr && va < v->addr + v->length) {
+      // Found the VMA
+      uint64 va_aligned = PGROUNDDOWN(va);
+      uint64 offset = va_aligned - v->addr;
+      uint64 file_offset = v->offset + offset;
+      
+      // Allocate a page
+      char *mem = kalloc();
+      if(mem == 0)
+        return -1;
+      memset(mem, 0, PGSIZE);
+      
+      // Read from file - calculate how much to read
+      ilock(v->file->ip);
+      uint64 file_size = v->file->ip->size;
+      uint64 bytes_to_read = PGSIZE;
+      
+      // Don't read beyond file size
+      if(file_offset >= file_size) {
+        // Beyond file end, just use zero-filled page
+        bytes_to_read = 0;
+      } else if(file_offset + PGSIZE > file_size) {
+        bytes_to_read = file_size - file_offset;
+      }
+      
+      int r = 0;
+      if(bytes_to_read > 0) {
+        r = readi(v->file->ip, 0, (uint64)mem, file_offset, bytes_to_read);
+        if(r != bytes_to_read) {
+          iunlock(v->file->ip);
+          kfree(mem);
+          return -1;
+        }
+      }
+      iunlock(v->file->ip);
+      
+      // Map the page
+      int perm = PTE_U;
+      if(v->prot & PROT_READ) perm |= PTE_R;
+      if(v->prot & PROT_WRITE) perm |= PTE_W;
+      
+      if(mappages(p->pagetable, va_aligned, PGSIZE, (uint64)mem, perm) != 0) {
+        kfree(mem);
+        return -1;
+      }
+      
+      return 0;
+    }
+  }
+  
+  return -1;  // No VMA found for this address
 }
 

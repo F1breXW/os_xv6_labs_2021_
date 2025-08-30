@@ -16,6 +16,14 @@
 #include "file.h"
 #include "fcntl.h"
 
+// mmap constants
+#ifndef PROT_READ
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
+#endif
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -483,4 +491,151 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int length, prot, flags, fd;
+  uint64 offset;
+  struct file *f;
+  struct proc *p = myproc();
+  
+  // Get arguments
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 || 
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argfd(4, &fd, &f) < 0 || argaddr(5, &offset) < 0)
+    return -1;
+    
+  // Check for invalid arguments
+  if(addr != 0 || offset != 0 || length <= 0)
+    return -1;
+    
+  // Check protection flags are valid
+  if((prot & ~(PROT_READ | PROT_WRITE)) != 0)
+    return -1;
+    
+  // Check map flags are valid
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+    
+  // Check file permissions
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+  if((prot & PROT_WRITE) && !f->writable && flags == MAP_SHARED)
+    return -1;
+    
+  // Find unused VMA
+  int i;
+  for(i = 0; i < NVMA; i++) {
+    if(p->vmas[i].used == 0)
+      break;
+  }
+  if(i == NVMA)
+    return -1;  // No free VMA slots
+    
+  // Find unused virtual address space
+  uint64 va = PGROUNDUP(p->sz);
+  
+  // Make sure we don't overlap with existing VMAs
+  int overlap;
+  do {
+    overlap = 0;
+    for(int j = 0; j < NVMA; j++) {
+      if(p->vmas[j].used && 
+         !(va + length <= p->vmas[j].addr || va >= p->vmas[j].addr + p->vmas[j].length)) {
+        // Overlaps with VMA[j], try next address
+        va = PGROUNDUP(p->vmas[j].addr + p->vmas[j].length);
+        overlap = 1;
+        break;
+      }
+    }
+  } while(overlap);
+  
+  // Initialize VMA
+  p->vmas[i].used = 1;
+  p->vmas[i].addr = va;
+  p->vmas[i].length = length;
+  p->vmas[i].prot = prot;
+  p->vmas[i].flags = flags;
+  p->vmas[i].file = filedup(f);  // Increase file reference count
+  p->vmas[i].offset = offset;
+  
+  return va;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+  
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+    
+  // Find the VMA
+  for(int i = 0; i < NVMA; i++) {
+    struct vma *v = &p->vmas[i];
+    if(v->used && addr >= v->addr && addr + length <= v->addr + v->length) {
+      
+      // If it's a MAP_SHARED mapping, write dirty pages back to file
+      if(v->flags == MAP_SHARED) {
+        // For simplicity, write back all pages in the range
+        uint64 start = PGROUNDDOWN(addr);
+        uint64 end = PGROUNDUP(addr + length);
+        
+        begin_op();
+        for(uint64 va = start; va < end; va += PGSIZE) {
+          pte_t *pte = walk(p->pagetable, va, 0);
+          if(pte && (*pte & PTE_V)) {
+            // Page is mapped, write it back
+            uint64 pa = PTE2PA(*pte);
+            uint64 file_offset = v->offset + (va - v->addr);
+            
+            ilock(v->file->ip);
+            writei(v->file->ip, 0, pa, file_offset, PGSIZE);
+            iunlock(v->file->ip);
+          }
+        }
+        end_op();
+      }
+      
+      // Unmap the pages - only unmap actually mapped pages
+      uint64 start = PGROUNDDOWN(addr);
+      uint64 end = PGROUNDUP(addr + length);
+      
+      for(uint64 va = start; va < end; va += PGSIZE) {
+        pte_t *pte = walk(p->pagetable, va, 0);
+        if(pte && (*pte & PTE_V)) {
+          // Page is mapped, unmap it
+          uint64 pa = PTE2PA(*pte);
+          kfree((void*)pa);
+          *pte = 0;
+        }
+      }
+      
+      // If unmapping the entire VMA, free it
+      if(addr == v->addr && length == v->length) {
+        fileclose(v->file);
+        v->used = 0;
+      } else if(addr == v->addr) {
+        // Unmapping from the beginning - adjust VMA start
+        v->addr += length;
+        v->length -= length;
+        v->offset += length;
+      } else if(addr + length == v->addr + v->length) {
+        // Unmapping from the end - adjust VMA length
+        v->length = addr - v->addr;
+      } else {
+        // Unmapping from middle - this is complex, for now just mark as error
+        return -1;
+      }
+      
+      return 0;
+    }
+  }
+  
+  return -1;  // VMA not found
 }
