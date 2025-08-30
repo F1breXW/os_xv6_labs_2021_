@@ -103,6 +103,36 @@ e1000_transmit(struct mbuf *m)
   // a pointer so that it can be freed after sending.
   //
   
+  acquire(&e1000_lock);
+  
+  // Ask the E1000 for the TX ring index at which it's expecting the next packet
+  uint32 tdt = regs[E1000_TDT];
+  
+  // Check if the ring is overflowing
+  if((tx_ring[tdt].status & E1000_TXD_STAT_DD) == 0) {
+    // E1000 hasn't finished the corresponding previous transmission request
+    release(&e1000_lock);
+    return -1;
+  }
+  
+  // Free the last mbuf that was transmitted from this descriptor (if there was one)
+  if(tx_mbufs[tdt] != 0) {
+    mbuffree(tx_mbufs[tdt]);
+  }
+  
+  // Fill in the descriptor
+  tx_ring[tdt].addr = (uint64)m->head;
+  tx_ring[tdt].length = m->len;
+  tx_ring[tdt].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_ring[tdt].status = 0; // Clear status bits
+  
+  // Stash away a pointer to the mbuf for later freeing
+  tx_mbufs[tdt] = m;
+  
+  // Update the ring position
+  regs[E1000_TDT] = (tdt + 1) % TX_RING_SIZE;
+  
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +145,37 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  
+  // Ask the E1000 for the ring index at which the next waiting received packet is located
+  while(1) {
+    uint32 rdt = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    
+    // Check if a new packet is available
+    if((rx_ring[rdt].status & E1000_RXD_STAT_DD) == 0) {
+      // No new packet available
+      break;
+    }
+    
+    // Update the mbuf's length to the length reported in the descriptor
+    rx_mbufs[rdt]->len = rx_ring[rdt].length;
+    
+    // Deliver the mbuf to the network stack
+    net_rx(rx_mbufs[rdt]);
+    
+    // Allocate a new mbuf to replace the one just given to net_rx()
+    rx_mbufs[rdt] = mbufalloc(0);
+    if(!rx_mbufs[rdt])
+      panic("e1000_recv");
+    
+    // Program its data pointer into the descriptor
+    rx_ring[rdt].addr = (uint64)rx_mbufs[rdt]->head;
+    
+    // Clear the descriptor's status bits to zero
+    rx_ring[rdt].status = 0;
+    
+    // Update the E1000_RDT register to be the index of the last ring descriptor processed
+    regs[E1000_RDT] = rdt;
+  }
 }
 
 void
